@@ -32,9 +32,9 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     const b = Buffer.from(hash(adminToken), 'hex');
     return timingSafeEqual(a, b);
   }
-  function agent(req) {
+  async function agent(req) {
     const value = token(req);
-    return value ? db.prepare('SELECT id, name, owner FROM agents WHERE key_hash=?').get(hash(value)) : null;
+    return value ? await db.prepare('SELECT id, name, owner FROM agents WHERE key_hash=?').get(hash(value)) : null;
   }
   async function body(req) {
     let data = '';
@@ -72,7 +72,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         return res.end(file);
       }
       if (req.method === 'GET' && path === '/api/v1/agents') {
-        return respond(res, 200, { items: db.prepare('SELECT id, name, description, owner, created_at FROM agents ORDER BY created_at DESC LIMIT 100').all() });
+        return respond(res, 200, { items: await db.prepare('SELECT id, name, description, owner, created_at FROM agents ORDER BY created_at DESC LIMIT 100').all() });
       }
       if (req.method === 'POST' && path === '/api/v1/agents') {
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
@@ -80,23 +80,23 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         const name = text(input.name, 80), owner = text(input.owner, 120), description = text(input.description, 500);
         if (!name || !owner) return respond(res, 400, { error: 'name and owner are required' });
         const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
-        db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at) VALUES (?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now());
+        await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at) VALUES (?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now());
         return respond(res, 201, { id, name, owner, api_key: key, warning: 'Store this key now; it cannot be retrieved later.' });
       }
       if (req.method === 'GET' && path === '/api/v1/me') {
-        const self = agent(req);
+        const self = await agent(req);
         return self ? respond(res, 200, self) : respond(res, 401, { error: 'Agent token required' });
       }
       if (req.method === 'GET' && path === '/api/v1/reports') {
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
-        return respond(res, 200, { items: db.prepare('SELECT * FROM reports WHERE status=? ORDER BY created_at DESC LIMIT 100').all('open') });
+        return respond(res, 200, { items: await db.prepare('SELECT * FROM reports WHERE status=? ORDER BY created_at DESC LIMIT 100').all('open') });
       }
       const reportStatus = /^\/api\/v1\/reports\/([a-f0-9-]{36})$/.exec(path);
       if (req.method === 'PATCH' && reportStatus) {
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
         const input = await body(req);
         if (input.status !== 'resolved') return respond(res, 400, { error: 'status must be resolved' });
-        const result = db.prepare('UPDATE reports SET status=? WHERE id=?').run('resolved', reportStatus[1]);
+        const result = await db.prepare('UPDATE reports SET status=? WHERE id=?').run('resolved', reportStatus[1]);
         return result.changes ? respond(res, 200, { id: reportStatus[1], status: 'resolved' }) : respond(res, 404, { error: 'Report not found' });
       }
       if (req.method === 'GET' && path === '/api/v1/posts') {
@@ -109,58 +109,58 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         if (kind) { clauses.push('p.kind=?'); values.push(kind); }
         if (category) { clauses.push('p.category=?'); values.push(category); }
         if (q) { clauses.push('(p.title LIKE ? OR p.body LIKE ?)'); values.push(`%${q}%`, `%${q}%`); }
-        const items = db.prepare(`SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE ${clauses.join(' AND ')} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...values, limit, offset);
+        const items = await db.prepare(`SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE ${clauses.join(' AND ')} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...values, limit, offset);
         return respond(res, 200, { items, limit, offset });
       }
       if (req.method === 'POST' && path === '/api/v1/posts') {
-        const self = agent(req);
+        const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
         const input = await body(req);
         const kind = input.kind, category = input.category, title = text(input.title, 140), description = text(input.body, 5000), budget = text(input.budget, 100);
         if (!kinds.has(kind) || !categories.has(category) || title.length < 8 || description.length < 20) return respond(res, 400, { error: 'kind, category, title (8+), body (20+) required' });
         const id = randomUUID(), stamp = now();
-        db.prepare('INSERT INTO posts (id,agent_id,kind,category,title,body,budget,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id,self.id,kind,category,title,description,budget,stamp,stamp);
+        await db.prepare('INSERT INTO posts (id,agent_id,kind,category,title,body,budget,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id,self.id,kind,category,title,description,budget,stamp,stamp);
         return respond(res, 201, { id, status: 'open', created_at: stamp }, { Location: `/api/v1/posts/${id}` });
       }
       const detail = /^\/api\/v1\/posts\/([a-f0-9-]{36})$/.exec(path);
       if (detail) {
-        const post = db.prepare('SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE p.id=?').get(detail[1]);
+        const post = await db.prepare('SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE p.id=?').get(detail[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
         if (req.method === 'GET') {
-          const replies = db.prepare('SELECT r.id,r.body,r.created_at,r.agent_id,a.name AS agent_name FROM replies r JOIN agents a ON a.id=r.agent_id WHERE r.post_id=? ORDER BY r.created_at ASC').all(detail[1]);
+          const replies = await db.prepare('SELECT r.id,r.body,r.created_at,r.agent_id,a.name AS agent_name FROM replies r JOIN agents a ON a.id=r.agent_id WHERE r.post_id=? ORDER BY r.created_at ASC').all(detail[1]);
           return respond(res, 200, { ...post, replies });
         }
         if (req.method === 'PATCH') {
-          const self = agent(req);
+          const self = await agent(req);
           if (self?.id !== post.agent_id && !isAdmin(req)) return respond(res, 403, { error: 'Author or admin required' });
           const input = await body(req);
           if (!statuses.has(input.status)) return respond(res, 400, { error: 'status must be open or closed' });
-          db.prepare('UPDATE posts SET status=?, updated_at=? WHERE id=?').run(input.status,now(),detail[1]);
+          await db.prepare('UPDATE posts SET status=?, updated_at=? WHERE id=?').run(input.status,now(),detail[1]);
           return respond(res, 200, { id: detail[1], status: input.status });
         }
       }
       const reply = /^\/api\/v1\/posts\/([a-f0-9-]{36})\/replies$/.exec(path);
       if (req.method === 'POST' && reply) {
-        const self = agent(req);
+        const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
-        const post = db.prepare('SELECT status FROM posts WHERE id=?').get(reply[1]);
+        const post = await db.prepare('SELECT status FROM posts WHERE id=?').get(reply[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
         if (post.status !== 'open') return respond(res, 409, { error: 'Post is closed' });
         const input = await body(req), message = text(input.body, 3000);
         if (message.length < 3) return respond(res, 400, { error: 'body must be at least 3 characters' });
         const id = randomUUID(), stamp = now();
-        db.prepare('INSERT INTO replies (id,post_id,agent_id,body,created_at) VALUES (?,?,?,?,?)').run(id,reply[1],self.id,message,stamp);
+        await db.prepare('INSERT INTO replies (id,post_id,agent_id,body,created_at) VALUES (?,?,?,?,?)').run(id,reply[1],self.id,message,stamp);
         return respond(res, 201, { id, post_id: reply[1], created_at: stamp });
       }
       const report = /^\/api\/v1\/posts\/([a-f0-9-]{36})\/reports$/.exec(path);
       if (req.method === 'POST' && report) {
-        const self = agent(req);
+        const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
-        if (!db.prepare('SELECT id FROM posts WHERE id=?').get(report[1])) return respond(res, 404, { error: 'Post not found' });
+        if (!await db.prepare('SELECT id FROM posts WHERE id=?').get(report[1])) return respond(res, 404, { error: 'Post not found' });
         const input = await body(req), reason = text(input.reason, 500);
         if (reason.length < 10) return respond(res, 400, { error: 'reason must be at least 10 characters' });
         const id = randomUUID();
-        try { db.prepare('INSERT INTO reports (id,post_id,agent_id,reason,created_at) VALUES (?,?,?,?,?)').run(id,report[1],self.id,reason,now()); }
+        try { await db.prepare('INSERT INTO reports (id,post_id,agent_id,reason,created_at) VALUES (?,?,?,?,?)').run(id,report[1],self.id,reason,now()); }
         catch { return respond(res, 409, { error: 'Already reported' }); }
         return respond(res, 201, { id, status: 'open' });
       }
@@ -172,6 +172,10 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     }
   };
   return http.createServer(handler);
+}
+
+export function createHandler(options = {}) {
+  return createApp(options).listeners('request')[0];
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
