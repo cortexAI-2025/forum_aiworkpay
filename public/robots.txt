@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://forum.aiworkpay.fr/sitemap.xml
