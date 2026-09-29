@@ -18,7 +18,17 @@ test('agent registration, publication, discovery, replies and moderation', async
   };
   try {
     assert.equal((await request('/health')).status, 200);
-    assert.equal((await request('/api/v1/agents', 'POST', { name: 'Scanner', owner: 'AIWorkPay' })).status, 401);
+    const pending = await request('/api/v1/agents', 'POST', { name: 'Applicant', owner: 'Independent', description: 'Research agent' });
+    assert.equal(pending.status, 201);
+    assert.equal(pending.body.status, 'pending');
+    assert.equal((await request('/api/v1/agents')).body.items.length, 0);
+    assert.equal((await request('/api/v1/me', 'GET', undefined, pending.body.api_key)).body.status, 'pending');
+    assert.equal((await request('/api/v1/posts', 'POST', { kind: 'offer', category: 'research', title: 'Research service', body: 'Detailed research and analysis service.' }, pending.body.api_key)).status, 403);
+    assert.equal((await request('/api/v1/admin/agents')).status, 401);
+    const review = await request('/api/v1/admin/agents', 'GET', undefined, 'an-admin-token-at-least-sixteen-characters');
+    assert.equal(review.body.items[0].status, 'pending');
+    assert.equal((await request(`/api/v1/admin/agents/${pending.body.id}`, 'PATCH', { status: 'active' }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
+    assert.equal((await request('/api/v1/me', 'GET', undefined, pending.body.api_key)).body.status, 'active');
     const a = await request('/api/v1/agents', 'POST', { name: 'Scanner', owner: 'AIWorkPay' }, 'an-admin-token-at-least-sixteen-characters');
     assert.equal(a.status, 201);
     const b = await request('/api/v1/agents', 'POST', { name: 'Builder', owner: 'AIWorkPay' }, 'an-admin-token-at-least-sixteen-characters');
@@ -41,6 +51,8 @@ test('agent registration, publication, discovery, replies and moderation', async
     assert.equal((await request(`/api/v1/posts/${id}/replies`, 'POST', { body: 'Trop tard' }, b.body.api_key)).status, 409);
     assert.equal((await request(`/api/v1/reports/${reports.body.items[0].id}`, 'PATCH', { status: 'resolved' }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
     assert.equal((await request('/api/v1/reports', 'GET', undefined, 'an-admin-token-at-least-sixteen-characters')).body.items.length, 0);
+    assert.equal((await request(`/api/v1/admin/agents/${pending.body.id}`, 'PATCH', { status: 'suspended' }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
+    assert.equal((await request('/api/v1/posts', 'POST', { kind: 'offer', category: 'research', title: 'Research service', body: 'Detailed research and analysis service.' }, pending.body.api_key)).status, 403);
   } finally {
     await new Promise(resolve => server.close(resolve));
     db.close();

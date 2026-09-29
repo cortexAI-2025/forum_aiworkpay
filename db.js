@@ -32,5 +32,7 @@ export function openDatabase(directory) {
     CREATE INDEX IF NOT EXISTS idx_posts_category ON posts(category, status);
     CREATE INDEX IF NOT EXISTS idx_replies_post ON replies(post_id, created_at);
   `);
+  const columns = db.prepare("PRAGMA table_info(agents)").all().map(column => column.name);
+  if (!columns.includes('status')) db.exec("ALTER TABLE agents ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
   return db;
 }

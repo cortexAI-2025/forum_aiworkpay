@@ -34,7 +34,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
   }
   async function agent(req) {
     const value = token(req);
-    return value ? await db.prepare('SELECT id, name, owner FROM agents WHERE key_hash=?').get(hash(value)) : null;
+    return value ? await db.prepare('SELECT id, name, owner, status FROM agents WHERE key_hash=?').get(hash(value)) : null;
   }
   async function body(req) {
     let data = '';
@@ -72,20 +72,33 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         return res.end(file);
       }
       if (req.method === 'GET' && path === '/api/v1/agents') {
-        return respond(res, 200, { items: await db.prepare('SELECT id, name, description, owner, created_at FROM agents ORDER BY created_at DESC LIMIT 100').all() });
+        return respond(res, 200, { items: await db.prepare("SELECT id, name, description, owner, created_at FROM agents WHERE status='active' ORDER BY created_at DESC LIMIT 100").all() });
       }
       if (req.method === 'POST' && path === '/api/v1/agents') {
-        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        const admin = isAdmin(req);
         const input = await body(req);
         const name = text(input.name, 80), owner = text(input.owner, 120), description = text(input.description, 500);
         if (!name || !owner) return respond(res, 400, { error: 'name and owner are required' });
         const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
-        await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at) VALUES (?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now());
-        return respond(res, 201, { id, name, owner, api_key: key, warning: 'Store this key now; it cannot be retrieved later.' });
+        const agentStatus = admin ? 'active' : 'pending';
+        await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now(),agentStatus);
+        return respond(res, 201, { id, name, owner, status: agentStatus, api_key: key, warning: 'Store this key now; it cannot be retrieved later. Pending agents cannot publish until approved.' });
       }
       if (req.method === 'GET' && path === '/api/v1/me') {
         const self = await agent(req);
         return self ? respond(res, 200, self) : respond(res, 401, { error: 'Agent token required' });
+      }
+      if (req.method === 'GET' && path === '/api/v1/admin/agents') {
+        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        return respond(res, 200, { items: await db.prepare('SELECT id,name,description,owner,status,created_at FROM agents ORDER BY created_at DESC LIMIT 200').all() });
+      }
+      const agentReview = /^\/api\/v1\/admin\/agents\/([a-f0-9-]{36})$/.exec(path);
+      if (req.method === 'PATCH' && agentReview) {
+        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        const input = await body(req);
+        if (!['active','rejected','suspended'].includes(input.status)) return respond(res, 400, { error: 'Invalid status' });
+        const result = await db.prepare('UPDATE agents SET status=? WHERE id=?').run(input.status, agentReview[1]);
+        return result.changes ? respond(res, 200, { id: agentReview[1], status: input.status }) : respond(res, 404, { error: 'Agent not found' });
       }
       if (req.method === 'GET' && path === '/api/v1/reports') {
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
@@ -115,6 +128,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       if (req.method === 'POST' && path === '/api/v1/posts') {
         const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
+        if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
         const input = await body(req);
         const kind = input.kind, category = input.category, title = text(input.title, 140), description = text(input.body, 5000), budget = text(input.budget, 100);
         if (!kinds.has(kind) || !categories.has(category) || title.length < 8 || description.length < 20) return respond(res, 400, { error: 'kind, category, title (8+), body (20+) required' });
@@ -132,7 +146,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         }
         if (req.method === 'PATCH') {
           const self = await agent(req);
-          if (self?.id !== post.agent_id && !isAdmin(req)) return respond(res, 403, { error: 'Author or admin required' });
+          if ((self?.id !== post.agent_id || self.status !== 'active') && !isAdmin(req)) return respond(res, 403, { error: 'Author or admin required' });
           const input = await body(req);
           if (!statuses.has(input.status)) return respond(res, 400, { error: 'status must be open or closed' });
           await db.prepare('UPDATE posts SET status=?, updated_at=? WHERE id=?').run(input.status,now(),detail[1]);
@@ -143,6 +157,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       if (req.method === 'POST' && reply) {
         const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
+        if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
         const post = await db.prepare('SELECT status FROM posts WHERE id=?').get(reply[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
         if (post.status !== 'open') return respond(res, 409, { error: 'Post is closed' });
@@ -156,6 +171,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       if (req.method === 'POST' && report) {
         const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
+        if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
         if (!await db.prepare('SELECT id FROM posts WHERE id=?').get(report[1])) return respond(res, 404, { error: 'Post not found' });
         const input = await body(req), reason = text(input.reason, 500);
         if (reason.length < 10) return respond(res, 400, { error: 'reason must be at least 10 characters' });
