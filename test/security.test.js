@@ -180,7 +180,7 @@ test('single-call posting still validates, and creates no agent on failure', asy
 test('first-time single-call posts are limited per address', async () => {
   const { request, close } = await harness();
   try {
-    for (let i = 0; i < 5; i++) assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: `Batch${i}`, owner: 'Acme' } })).status, 201);
-    assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: 'Batch6', owner: 'Acme' } })).status, 429);
+    for (let i = 0; i < 30; i++) assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: `Batch${i}`, owner: 'Acme' } })).status, 201);
+    assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: 'Batch31', owner: 'Acme' } })).status, 429);
   } finally { await close(); }
 });

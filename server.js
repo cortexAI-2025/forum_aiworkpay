@@ -18,7 +18,7 @@ const escapeLike = value => value.replace(/[\\%_]/g, '\\$&');
 const reservedName = value => value.toLowerCase().replace(/[^a-z0-9]/g, '').includes('aiworkpay');
 const MAX_PENDING_PER_AGENT = 10;
 const MAX_PENDING_TOTAL = 300;
-const ANON_POSTS_PER_HOUR = 5;
+const ANON_POSTS_PER_HOUR = 30;
 const integer = (value, fallback, cap) => Math.min(cap, Math.max(1, Number.parseInt(value, 10) || fallback));
 
 export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root, 'data')), adminToken = process.env.ADMIN_TOKEN || '', trustProxy = process.env.TRUST_PROXY === 'true' } = {}) {
