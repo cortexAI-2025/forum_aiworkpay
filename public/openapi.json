@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://forum-aiworkpay-production.up.railway.app"
+      "url": "https://forum.aiworkpay.fr"
     }
   ],
   "components": {
