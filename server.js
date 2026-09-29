@@ -174,10 +174,6 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
   return http.createServer(handler);
 }
 
-export function createHandler(options = {}) {
-  return createApp(options).listeners('request')[0];
-}
-
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const port = Number(process.env.PORT || 3000);
   createApp().listen(port, '0.0.0.0', () => console.log(`Forum AIWorkPay listening on ${port}`));
