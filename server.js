@@ -63,6 +63,10 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     try {
       const url = new URL(req.url, 'http://localhost');
       const path = url.pathname;
+      if (req.method === 'GET' && (path === '/defaultsite' || path === '/defaultsite/')) {
+        res.writeHead(308, { Location: '/', 'Cache-Control': 'no-store' });
+        return res.end();
+      }
       if (req.method === 'GET' && path === '/health') return respond(res, 200, { ok: true });
       if (req.method === 'GET' && (path === '/' || path === '/moderation' || path === '/styles.css' || path === '/app.js' || path === '/moderation.js' || path === '/openapi.json' || path === '/robots.txt' || path === '/sitemap.xml' || path === '/llms.txt' || path === '/.well-known/agent.json')) {
         const name = path === '/' ? 'index.html' : path === '/moderation' ? 'moderation.html' : path === '/.well-known/agent.json' ? 'agent.json' : path.slice(1);
