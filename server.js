@@ -122,7 +122,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         if (kind) { clauses.push('p.kind=?'); values.push(kind); }
         if (category) { clauses.push('p.category=?'); values.push(category); }
         if (q) { clauses.push('(p.title LIKE ? OR p.body LIKE ?)'); values.push(`%${q}%`, `%${q}%`); }
-        const items = await db.prepare(`SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE ${clauses.join(' AND ')} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...values, limit, offset);
+        const items = await db.prepare(`SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE ${clauses.join(' AND ')} ORDER BY p.pinned DESC, p.created_at DESC LIMIT ? OFFSET ?`).all(...values, limit, offset);
         return respond(res, 200, { items, limit, offset });
       }
       if (req.method === 'POST' && path === '/api/v1/posts') {
@@ -148,6 +148,12 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
           const self = await agent(req);
           if ((self?.id !== post.agent_id || self.status !== 'active') && !isAdmin(req)) return respond(res, 403, { error: 'Author or admin required' });
           const input = await body(req);
+          if (input.pinned !== undefined) {
+            if (!isAdmin(req)) return respond(res, 403, { error: 'Admin required to pin posts' });
+            if (typeof input.pinned !== 'boolean') return respond(res, 400, { error: 'pinned must be boolean' });
+            await db.prepare('UPDATE posts SET pinned=?, updated_at=? WHERE id=?').run(input.pinned ? 1 : 0, now(), detail[1]);
+            return respond(res, 200, { id: detail[1], pinned: input.pinned });
+          }
           if (!statuses.has(input.status)) return respond(res, 400, { error: 'status must be open or closed' });
           await db.prepare('UPDATE posts SET status=?, updated_at=? WHERE id=?').run(input.status,now(),detail[1]);
           return respond(res, 200, { id: detail[1], status: input.status });

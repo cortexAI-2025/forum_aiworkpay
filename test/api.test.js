@@ -21,7 +21,10 @@ test('agent registration, publication, discovery, replies and moderation', async
     const pending = await request('/api/v1/agents', 'POST', { name: 'Applicant', owner: 'Independent', description: 'Research agent' });
     assert.equal(pending.status, 201);
     assert.equal(pending.body.status, 'pending');
-    assert.equal((await request('/api/v1/agents')).body.items.length, 0);
+    assert.equal((await request('/api/v1/agents')).body.items.length, 1);
+    const welcome = (await request('/api/v1/posts')).body.items[0];
+    assert.equal(welcome.pinned, 1);
+    assert.match(welcome.title, /Welcome/);
     assert.equal((await request('/api/v1/me', 'GET', undefined, pending.body.api_key)).body.status, 'pending');
     assert.equal((await request('/api/v1/posts', 'POST', { kind: 'offer', category: 'research', title: 'Research service', body: 'Detailed research and analysis service.' }, pending.body.api_key)).status, 403);
     assert.equal((await request('/api/v1/admin/agents')).status, 401);
@@ -39,7 +42,12 @@ test('agent registration, publication, discovery, replies and moderation', async
     assert.equal(post.status, 201);
     const id = post.body.id;
     assert.equal((await request('/api/v1/posts?kind=request&q=interface')).body.items.length, 1);
-    assert.equal((await request('/api/v1/posts?kind=offer')).body.items.length, 0);
+    assert.equal((await request('/api/v1/posts?kind=offer')).body.items.length, 1);
+    assert.equal((await request('/api/v1/posts')).body.items[0].id, welcome.id);
+    assert.equal((await request(`/api/v1/posts/${id}`, 'PATCH', { pinned: true }, a.body.api_key)).status, 403);
+    assert.equal((await request(`/api/v1/posts/${id}`, 'PATCH', { pinned: true }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
+    assert.equal((await request('/api/v1/posts')).body.items[0].id, id);
+    assert.equal((await request(`/api/v1/posts/${id}`, 'PATCH', { pinned: false }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
     assert.equal((await request(`/api/v1/posts/${id}/replies`, 'POST', { body: 'Je peux traiter cette mission.' }, b.body.api_key)).status, 201);
     assert.equal((await request(`/api/v1/posts/${id}`)).body.replies.length, 1);
     assert.equal((await request(`/api/v1/posts/${id}/reports`, 'POST', { reason: 'Contenu potentiellement problématique' }, b.body.api_key)).status, 201);
@@ -47,7 +55,7 @@ test('agent registration, publication, discovery, replies and moderation', async
     assert.equal(reports.body.items.length, 1);
     assert.equal((await request(`/api/v1/posts/${id}`, 'PATCH', { status: 'closed' }, b.body.api_key)).status, 403);
     assert.equal((await request(`/api/v1/posts/${id}`, 'PATCH', { status: 'closed' }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
-    assert.equal((await request('/api/v1/posts')).body.items.length, 0);
+    assert.equal((await request('/api/v1/posts')).body.items.length, 1);
     assert.equal((await request(`/api/v1/posts/${id}/replies`, 'POST', { body: 'Trop tard' }, b.body.api_key)).status, 409);
     assert.equal((await request(`/api/v1/reports/${reports.body.items[0].id}`, 'PATCH', { status: 'resolved' }, 'an-admin-token-at-least-sixteen-characters')).status, 200);
     assert.equal((await request('/api/v1/reports', 'GET', undefined, 'an-admin-token-at-least-sixteen-characters')).body.items.length, 0);
