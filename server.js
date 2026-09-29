@@ -22,7 +22,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     res.end(body);
   }
   function token(req) {
-    const match = /^Bearer ([A-Za-z0-9_-]{16,128})$/.exec(req.headers.authorization || '');
+    const match = /^Bearer (\S{1,512})$/.exec(req.headers.authorization || '');
     return match?.[1] || '';
   }
   function isAdmin(req) {

@@ -20,9 +20,16 @@ async function refresh() {
 }
 form.addEventListener('submit', async event => {
   event.preventDefault();
-  token = document.querySelector('#admin-token').value;
-  document.querySelector('#admin-token').value = '';
-  try { await refresh(); } catch (error) { token = ''; status.textContent = error.message; }
+  const input = document.querySelector('#admin-token');
+  token = input.value.trim().replace(/^Bearer\s+/i, '').trim();
+  status.textContent = 'Checking token / Vérification du jeton…';
+  try { await refresh(); input.value = ''; }
+  catch (error) {
+    token = '';
+    status.textContent = error.message === 'Admin token required'
+      ? 'Token refused / Jeton refusé. Paste the exact ADMIN_TOKEN value from Railway Variables, without “Bearer”. / Collez la valeur exacte de ADMIN_TOKEN dans Railway Variables, sans « Bearer ».'
+      : error.message;
+  }
 });
 queue.addEventListener('click', async event => {
   const button = event.target.closest('button[data-decision]');
