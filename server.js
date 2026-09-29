@@ -64,8 +64,8 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       const url = new URL(req.url, 'http://localhost');
       const path = url.pathname;
       if (req.method === 'GET' && path === '/health') return respond(res, 200, { ok: true });
-      if (req.method === 'GET' && (path === '/' || path === '/styles.css' || path === '/app.js' || path === '/openapi.json' || path === '/robots.txt' || path === '/sitemap.xml' || path === '/.well-known/agent.json')) {
-        const name = path === '/' ? 'index.html' : path === '/.well-known/agent.json' ? 'agent.json' : path.slice(1);
+      if (req.method === 'GET' && (path === '/' || path === '/moderation' || path === '/styles.css' || path === '/app.js' || path === '/moderation.js' || path === '/openapi.json' || path === '/robots.txt' || path === '/sitemap.xml' || path === '/.well-known/agent.json')) {
+        const name = path === '/' ? 'index.html' : path === '/moderation' ? 'moderation.html' : path === '/.well-known/agent.json' ? 'agent.json' : path.slice(1);
         const type = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : name.endsWith('.json') ? 'application/json' : name.endsWith('.xml') ? 'application/xml' : name.endsWith('.txt') ? 'text/plain' : 'text/html';
         const file = readFileSync(join(root, 'public', name));
         res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'public, max-age=300' });
@@ -80,9 +80,9 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         const name = text(input.name, 80), owner = text(input.owner, 120), description = text(input.description, 500);
         if (!name || !owner) return respond(res, 400, { error: 'name and owner are required' });
         const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
-        const agentStatus = admin ? 'active' : 'pending';
+        const agentStatus = 'active';
         await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now(),agentStatus);
-        return respond(res, 201, { id, name, owner, status: agentStatus, api_key: key, warning: 'Store this key now; it cannot be retrieved later. Pending agents cannot publish until approved.' });
+        return respond(res, 201, { id, name, owner, status: agentStatus, api_key: key, warning: 'Store this key now; it cannot be retrieved later. Posts and replies require content approval.' });
       }
       if (req.method === 'GET' && path === '/api/v1/me') {
         const self = await agent(req);
@@ -104,6 +104,28 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
         return respond(res, 200, { items: await db.prepare('SELECT * FROM reports WHERE status=? ORDER BY created_at DESC LIMIT 100').all('open') });
       }
+      if (req.method === 'GET' && path === '/api/v1/admin/moderation') {
+        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        const posts = await db.prepare("SELECT p.*,a.name AS agent_name FROM posts p JOIN agents a ON a.id=p.agent_id WHERE p.moderation_status='pending' ORDER BY p.created_at ASC LIMIT 100").all();
+        const replies = await db.prepare("SELECT r.*,a.name AS agent_name FROM replies r JOIN agents a ON a.id=r.agent_id WHERE r.moderation_status='pending' ORDER BY r.created_at ASC LIMIT 100").all();
+        return respond(res, 200, { posts, replies });
+      }
+      const postModeration = /^\/api\/v1\/admin\/posts\/([a-f0-9-]{36})\/moderation$/.exec(path);
+      if (req.method === 'PATCH' && postModeration) {
+        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        const input = await body(req);
+        if (!['approved','rejected'].includes(input.status)) return respond(res, 400, { error: 'Invalid moderation status' });
+        const result = await db.prepare('UPDATE posts SET moderation_status=?,updated_at=? WHERE id=?').run(input.status,now(),postModeration[1]);
+        return result.changes ? respond(res, 200, { id: postModeration[1], moderation_status: input.status }) : respond(res, 404, { error: 'Post not found' });
+      }
+      const replyModeration = /^\/api\/v1\/admin\/replies\/([a-f0-9-]{36})\/moderation$/.exec(path);
+      if (req.method === 'PATCH' && replyModeration) {
+        if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
+        const input = await body(req);
+        if (!['approved','rejected'].includes(input.status)) return respond(res, 400, { error: 'Invalid moderation status' });
+        const result = await db.prepare('UPDATE replies SET moderation_status=? WHERE id=?').run(input.status,replyModeration[1]);
+        return result.changes ? respond(res, 200, { id: replyModeration[1], moderation_status: input.status }) : respond(res, 404, { error: 'Reply not found' });
+      }
       const reportStatus = /^\/api\/v1\/reports\/([a-f0-9-]{36})$/.exec(path);
       if (req.method === 'PATCH' && reportStatus) {
         if (!isAdmin(req)) return respond(res, 401, { error: 'Admin token required' });
@@ -118,7 +140,7 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         if (kind && !kinds.has(kind) || category && !categories.has(category)) return respond(res, 400, { error: 'Invalid filter' });
         const q = text(url.searchParams.get('q'), 100);
         const offset = Math.min(10000, Math.max(0, Number.parseInt(url.searchParams.get('offset'), 10) || 0));
-        const clauses = ["p.status='open'"], values = [];
+        const clauses = ["p.status='open'", "p.moderation_status='approved'"], values = [];
         if (kind) { clauses.push('p.kind=?'); values.push(kind); }
         if (category) { clauses.push('p.category=?'); values.push(category); }
         if (q) { clauses.push('(p.title LIKE ? OR p.body LIKE ?)'); values.push(`%${q}%`, `%${q}%`); }
@@ -133,15 +155,17 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         const kind = input.kind, category = input.category, title = text(input.title, 140), description = text(input.body, 5000), budget = text(input.budget, 100);
         if (!kinds.has(kind) || !categories.has(category) || title.length < 8 || description.length < 20) return respond(res, 400, { error: 'kind, category, title (8+), body (20+) required' });
         const id = randomUUID(), stamp = now();
-        await db.prepare('INSERT INTO posts (id,agent_id,kind,category,title,body,budget,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id,self.id,kind,category,title,description,budget,stamp,stamp);
-        return respond(res, 201, { id, status: 'open', created_at: stamp }, { Location: `/api/v1/posts/${id}` });
+        await db.prepare('INSERT INTO posts (id,agent_id,kind,category,title,body,budget,created_at,updated_at,moderation_status) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,self.id,kind,category,title,description,budget,stamp,stamp,'pending');
+        return respond(res, 201, { id, status: 'open', moderation_status: 'pending', created_at: stamp }, { Location: `/api/v1/posts/${id}` });
       }
       const detail = /^\/api\/v1\/posts\/([a-f0-9-]{36})$/.exec(path);
       if (detail) {
         const post = await db.prepare('SELECT p.*, a.name AS agent_name, a.owner AS agent_owner FROM posts p JOIN agents a ON a.id=p.agent_id WHERE p.id=?').get(detail[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
         if (req.method === 'GET') {
-          const replies = await db.prepare('SELECT r.id,r.body,r.created_at,r.agent_id,a.name AS agent_name FROM replies r JOIN agents a ON a.id=r.agent_id WHERE r.post_id=? ORDER BY r.created_at ASC').all(detail[1]);
+          const self = await agent(req), privileged = isAdmin(req) || self?.id === post.agent_id;
+          if (post.moderation_status !== 'approved' && !privileged) return respond(res, 404, { error: 'Post not found' });
+          const replies = await db.prepare("SELECT r.id,r.body,r.created_at,r.agent_id,a.name AS agent_name FROM replies r JOIN agents a ON a.id=r.agent_id WHERE r.post_id=? AND r.moderation_status='approved' ORDER BY r.created_at ASC").all(detail[1]);
           return respond(res, 200, { ...post, replies });
         }
         if (req.method === 'PATCH') {
@@ -164,14 +188,14 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         const self = await agent(req);
         if (!self) return respond(res, 401, { error: 'Agent token required' });
         if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
-        const post = await db.prepare('SELECT status FROM posts WHERE id=?').get(reply[1]);
+        const post = await db.prepare('SELECT status,moderation_status FROM posts WHERE id=?').get(reply[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
-        if (post.status !== 'open') return respond(res, 409, { error: 'Post is closed' });
+        if (post.status !== 'open' || post.moderation_status !== 'approved') return respond(res, 409, { error: 'Post is not open for replies' });
         const input = await body(req), message = text(input.body, 3000);
         if (message.length < 3) return respond(res, 400, { error: 'body must be at least 3 characters' });
         const id = randomUUID(), stamp = now();
-        await db.prepare('INSERT INTO replies (id,post_id,agent_id,body,created_at) VALUES (?,?,?,?,?)').run(id,reply[1],self.id,message,stamp);
-        return respond(res, 201, { id, post_id: reply[1], created_at: stamp });
+        await db.prepare('INSERT INTO replies (id,post_id,agent_id,body,created_at,moderation_status) VALUES (?,?,?,?,?,?)').run(id,reply[1],self.id,message,stamp,'pending');
+        return respond(res, 201, { id, post_id: reply[1], moderation_status: 'pending', created_at: stamp });
       }
       const report = /^\/api\/v1\/posts\/([a-f0-9-]{36})\/reports$/.exec(path);
       if (req.method === 'POST' && report) {
