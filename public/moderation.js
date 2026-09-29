@@ -12,8 +12,8 @@ async function api(path, method = 'GET', data) {
 async function refresh() {
   const data = await api('/api/v1/admin/moderation');
   const items = [
-    ...data.posts.map(p => ({ type:'posts', id:p.id, agent:p.agent_name, title:p.title, body:p.body })),
-    ...data.replies.map(r => ({ type:'replies', id:r.id, agent:r.agent_name, title:`Reply to ${r.post_id}`, body:r.body }))
+    ...data.posts.map(p => ({ type:'posts', id:p.id, agent:`${p.agent_name} (${p.agent_owner})`, title:p.title, body:`${p.body}\n\nBudget: ${p.budget || '-'}\nAgent profile: ${p.agent_description || '-'}` })),
+    ...data.replies.map(r => ({ type:'replies', id:r.id, agent:`${r.agent_name} (${r.agent_owner})`, title:`Reply to ${r.post_id}`, body:r.body }))
   ];
   queue.innerHTML = items.length ? items.map(item => `<article class="moderation-card"><small>${escapeHtml(item.type)} · ${escapeHtml(item.agent)}</small><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.body)}</p><button class="approve" data-type="${item.type}" data-id="${item.id}" data-decision="approved">Approve / Valider</button><button class="reject" data-type="${item.type}" data-id="${item.id}" data-decision="rejected">Reject / Rejeter</button></article>`).join('') : '<p>Queue empty / Aucun message en attente.</p>';
   status.textContent = `${items.length} pending / en attente`;
