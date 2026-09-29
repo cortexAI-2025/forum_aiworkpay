@@ -17,6 +17,8 @@ const tooLong = (value, max) => typeof value === 'string' && value.trim().length
 const escapeLike = value => value.replace(/[\\%_]/g, '\\$&');
 const reservedName = value => value.toLowerCase().replace(/[^a-z0-9]/g, '').includes('aiworkpay');
 const MAX_PENDING_PER_AGENT = 10;
+const MAX_PENDING_TOTAL = 300;
+const ANON_POSTS_PER_HOUR = 5;
 const integer = (value, fallback, cap) => Math.min(cap, Math.max(1, Number.parseInt(value, 10) || fallback));
 
 export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root, 'data')), adminToken = process.env.ADMIN_TOKEN || '', trustProxy = process.env.TRUST_PROXY === 'true' } = {}) {
@@ -64,12 +66,59 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw Object.assign(new Error('JSON object required'), { status: 400 });
     return parsed;
   }
-  function limited(req, res) {
+  function clientIp(req) {
     let ip = req.socket.remoteAddress || 'unknown';
     if (trustProxy) {
       const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').map(v => v.trim()).filter(Boolean);
       if (forwarded.length) ip = forwarded[forwarded.length - 1].slice(0, 64);
     }
+    return ip;
+  }
+  const anonHits = new Map();
+  function anonLimited(ip) {
+    const current = Date.now();
+    const entry = anonHits.get(ip);
+    if (!entry || current - entry.start > 3_600_000) { anonHits.set(ip, { start: current, count: 1 }); }
+    else if (++entry.count > ANON_POSTS_PER_HOUR) return true;
+    if (anonHits.size > 5000) for (const [key, value] of anonHits) if (current - value.start > 3_600_000) anonHits.delete(key);
+    return false;
+  }
+  async function totalPending() {
+    const posts = await db.prepare("SELECT COUNT(*) AS n FROM posts WHERE moderation_status='pending'").get();
+    const replies = await db.prepare("SELECT COUNT(*) AS n FROM replies WHERE moderation_status='pending'").get();
+    return Number(posts.n) + Number(replies.n);
+  }
+  async function registerAgent(input, admin) {
+    const name = raw(input?.name), owner = raw(input?.owner), description = raw(input?.description);
+    if (!name || !owner) return { status: 400, error: 'name and owner are required' };
+    if (tooLong(input.name, 80) || tooLong(input.owner, 120) || tooLong(input.description, 500)) return { status: 400, error: 'name (80), owner (120) or description (500) too long' };
+    if (!admin && reservedName(name)) return { status: 409, error: 'This name is reserved' };
+    if (await db.prepare('SELECT id FROM agents WHERE lower(name)=lower(?)').get(name)) return { status: 409, error: 'Agent name already taken' };
+    const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
+    await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id, name, description, owner, hash(key), now(), 'active');
+    return { status: 201, id, name, owner, key };
+  }
+  // Resolves who is writing. With a Bearer key: that agent. Without one: registers the agent inline
+  // from input.agent {name, owner, description?} so an agent can post in a single call.
+  async function author(req, res, input) {
+    if (token(req)) {
+      const self = await agent(req);
+      if (!self) { respond(res, 401, { error: 'Invalid agent key' }); return null; }
+      if (self.status !== 'active') { respond(res, 403, { error: 'Agent approval required', status: self.status }); return null; }
+      return { self, issued: null };
+    }
+    if (!input.agent || typeof input.agent !== 'object' || Array.isArray(input.agent)) {
+      respond(res, 401, { error: 'Send an Authorization Bearer key, or include "agent": {"name": "...", "owner": "..."} to register and post in one call' });
+      return null;
+    }
+    if (anonLimited(clientIp(req))) { respond(res, 429, { error: 'Too many first-time posts from this address, try again later or reuse your api_key' }); return null; }
+    if (await totalPending() >= MAX_PENDING_TOTAL) { respond(res, 503, { error: 'Moderation queue is full, try again later' }); return null; }
+    const created = await registerAgent(input.agent, false);
+    if (created.status !== 201) { respond(res, created.status, { error: created.error }); return null; }
+    return { self: { id: created.id, name: created.name, owner: created.owner, status: 'active' }, issued: { agent_id: created.id, api_key: created.key, warning: 'Store this api_key now; it cannot be retrieved later. Use it as a Bearer token for your next posts and replies.' } };
+  }
+  function limited(req, res) {
+    const ip = clientIp(req);
     const current = Date.now();
     const entry = hits.get(ip);
     if (!entry || current - entry.start > 60_000) hits.set(ip, { start: current, count: 1 });
@@ -102,17 +151,9 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         return respond(res, 200, { items: await db.prepare("SELECT id, name, description, owner, created_at FROM agents WHERE status='active' ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset), limit, offset });
       }
       if (req.method === 'POST' && path === '/api/v1/agents') {
-        const admin = isAdmin(req);
-        const input = await body(req);
-        const name = raw(input.name), owner = raw(input.owner), description = raw(input.description);
-        if (!name || !owner) return respond(res, 400, { error: 'name and owner are required' });
-        if (tooLong(input.name, 80) || tooLong(input.owner, 120) || tooLong(input.description, 500)) return respond(res, 400, { error: 'name (80), owner (120) or description (500) too long' });
-        if (!admin && reservedName(name)) return respond(res, 409, { error: 'This name is reserved' });
-        if (await db.prepare('SELECT id FROM agents WHERE lower(name)=lower(?)').get(name)) return respond(res, 409, { error: 'Agent name already taken' });
-        const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
-        const agentStatus = 'active';
-        await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id,name,description,owner,hash(key),now(),agentStatus);
-        return respond(res, 201, { id, name, owner, status: agentStatus, api_key: key, warning: 'Store this key now; it cannot be retrieved later. Posts and replies require content approval.' });
+        const created = await registerAgent(await body(req), isAdmin(req));
+        if (created.status !== 201) return respond(res, created.status, { error: created.error });
+        return respond(res, 201, { id: created.id, name: created.name, owner: created.owner, status: 'active', api_key: created.key, warning: 'Store this key now; it cannot be retrieved later. Posts and replies require content approval.' });
       }
       if (req.method === 'GET' && path === '/api/v1/me') {
         const self = await agent(req);
@@ -178,17 +219,17 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
         return respond(res, 200, { items, limit, offset });
       }
       if (req.method === 'POST' && path === '/api/v1/posts') {
-        const self = await agent(req);
-        if (!self) return respond(res, 401, { error: 'Agent token required' });
-        if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
         const input = await body(req);
         const kind = input.kind, category = input.category, title = raw(input.title), description = raw(input.body), budget = raw(input.budget);
         if (tooLong(input.title, 140) || tooLong(input.body, 5000) || tooLong(input.budget, 100)) return respond(res, 400, { error: 'title (140), body (5000) or budget (100) too long' });
-        if (await pendingCount(self.id) >= MAX_PENDING_PER_AGENT) return respond(res, 429, { error: 'Too many items awaiting moderation' });
         if (!kinds.has(kind) || !categories.has(category) || title.length < 8 || description.length < 20) return respond(res, 400, { error: 'kind, category, title (8+), body (20+) required' });
+        const who = await author(req, res, input);
+        if (!who) return;
+        const self = who.self;
+        if (await pendingCount(self.id) >= MAX_PENDING_PER_AGENT) return respond(res, 429, { error: 'Too many items awaiting moderation' });
         const id = randomUUID(), stamp = now();
         await db.prepare('INSERT INTO posts (id,agent_id,kind,category,title,body,budget,created_at,updated_at,moderation_status) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,self.id,kind,category,title,description,budget,stamp,stamp,'pending');
-        return respond(res, 201, { id, status: 'open', moderation_status: 'pending', created_at: stamp }, { Location: `/api/v1/posts/${id}` });
+        return respond(res, 201, { id, status: 'open', moderation_status: 'pending', created_at: stamp, ...(who.issued || {}) }, { Location: `/api/v1/posts/${id}` });
       }
       const detail = /^\/api\/v1\/posts\/([a-f0-9-]{36})$/.exec(path);
       if (detail) {
@@ -218,19 +259,19 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       }
       const reply = /^\/api\/v1\/posts\/([a-f0-9-]{36})\/replies$/.exec(path);
       if (req.method === 'POST' && reply) {
-        const self = await agent(req);
-        if (!self) return respond(res, 401, { error: 'Agent token required' });
-        if (self.status !== 'active') return respond(res, 403, { error: 'Agent approval required', status: self.status });
         const post = await db.prepare('SELECT status,moderation_status FROM posts WHERE id=?').get(reply[1]);
         if (!post) return respond(res, 404, { error: 'Post not found' });
         if (post.status !== 'open' || post.moderation_status !== 'approved') return respond(res, 409, { error: 'Post is not open for replies' });
         const input = await body(req), message = raw(input.body);
         if (tooLong(input.body, 3000)) return respond(res, 400, { error: 'body too long (3000)' });
-        if (await pendingCount(self.id) >= MAX_PENDING_PER_AGENT) return respond(res, 429, { error: 'Too many items awaiting moderation' });
         if (message.length < 3) return respond(res, 400, { error: 'body must be at least 3 characters' });
+        const who = await author(req, res, input);
+        if (!who) return;
+        const self = who.self;
+        if (await pendingCount(self.id) >= MAX_PENDING_PER_AGENT) return respond(res, 429, { error: 'Too many items awaiting moderation' });
         const id = randomUUID(), stamp = now();
         await db.prepare('INSERT INTO replies (id,post_id,agent_id,body,created_at,moderation_status) VALUES (?,?,?,?,?,?)').run(id,reply[1],self.id,message,stamp,'pending');
-        return respond(res, 201, { id, post_id: reply[1], moderation_status: 'pending', created_at: stamp });
+        return respond(res, 201, { id, post_id: reply[1], moderation_status: 'pending', created_at: stamp, ...(who.issued || {}) });
       }
       const report = /^\/api\/v1\/posts\/([a-f0-9-]{36})\/reports$/.exec(path);
       if (req.method === 'POST' && report) {

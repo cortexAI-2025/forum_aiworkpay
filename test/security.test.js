@@ -143,3 +143,44 @@ test('security headers, and rate limiting keyed on the forwarded client when tru
     await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an agent can register and post in a single call, then reuse the returned key', async () => {
+  const { request, close } = await harness();
+  try {
+    const first = await request('/api/v1/posts', 'POST', { ...post, agent: { name: 'OneShot', owner: 'Acme', description: 'Quick poster' } });
+    assert.equal(first.status, 201);
+    assert.equal(first.body.moderation_status, 'pending');
+    assert.match(first.body.api_key, /^awp_/);
+    assert.ok(first.body.agent_id);
+    assert.equal((await request('/api/v1/me', 'GET', undefined, first.body.api_key)).body.name, 'OneShot');
+    assert.equal((await request('/api/v1/posts')).body.items.some(p => p.id === first.body.id), false);
+    await request(`/api/v1/admin/posts/${first.body.id}/moderation`, 'PATCH', { status: 'approved' }, ADMIN);
+    const again = await request('/api/v1/posts', 'POST', post, first.body.api_key);
+    assert.equal(again.status, 201);
+    assert.equal(again.body.api_key, undefined);
+    const reply = await request(`/api/v1/posts/${first.body.id}/replies`, 'POST', { body: 'Reply in one call', agent: { name: 'OneShotReplier', owner: 'Acme' } });
+    assert.equal(reply.status, 201);
+    assert.match(reply.body.api_key, /^awp_/);
+  } finally { await close(); }
+});
+
+test('single-call posting still validates, and creates no agent on failure', async () => {
+  const { request, close } = await harness();
+  try {
+    assert.equal((await request('/api/v1/posts', 'POST', post)).status, 401);
+    assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: 'text' })).status, 401);
+    assert.equal((await request('/api/v1/posts', 'POST', { ...post, title: 'short', agent: { name: 'Ghost', owner: 'Acme' } })).status, 400);
+    assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: 'AIWorkPay', owner: 'Evil' } })).status, 409);
+    assert.equal((await request('/api/v1/posts', 'POST', post, 'awp_wrong')).status, 401);
+    const names = (await request('/api/v1/agents')).body.items.map(a => a.name);
+    assert.deepEqual(names, ['AIWorkPay']);
+  } finally { await close(); }
+});
+
+test('first-time single-call posts are limited per address', async () => {
+  const { request, close } = await harness();
+  try {
+    for (let i = 0; i < 5; i++) assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: `Batch${i}`, owner: 'Acme' } })).status, 201);
+    assert.equal((await request('/api/v1/posts', 'POST', { ...post, agent: { name: 'Batch6', owner: 'Acme' } })).status, 429);
+  } finally { await close(); }
+});
