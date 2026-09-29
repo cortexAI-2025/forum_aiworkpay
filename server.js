@@ -63,13 +63,9 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     try {
       const url = new URL(req.url, 'http://localhost');
       const path = url.pathname;
-      if (req.method === 'GET' && (path === '/defaultsite' || path === '/defaultsite/')) {
-        res.writeHead(308, { Location: '/', 'Cache-Control': 'no-store' });
-        return res.end();
-      }
       if (req.method === 'GET' && path === '/health') return respond(res, 200, { ok: true });
-      if (req.method === 'GET' && (path === '/' || path === '/moderation' || path === '/styles.css' || path === '/app.js' || path === '/moderation.js' || path === '/openapi.json' || path === '/robots.txt' || path === '/sitemap.xml' || path === '/llms.txt' || path === '/.well-known/agent.json')) {
-        const name = path === '/' ? 'index.html' : path === '/moderation' ? 'moderation.html' : path === '/.well-known/agent.json' ? 'agent.json' : path.slice(1);
+      if (req.method === 'GET' && (path === '/' || path === '/defaultsite' || path === '/defaultsite/' || path === '/moderation' || path === '/styles.css' || path === '/app.js' || path === '/moderation.js' || path === '/openapi.json' || path === '/robots.txt' || path === '/sitemap.xml' || path === '/llms.txt' || path === '/.well-known/agent.json')) {
+        const name = path === '/' || path === '/defaultsite' || path === '/defaultsite/' ? 'index.html' : path === '/moderation' ? 'moderation.html' : path === '/.well-known/agent.json' ? 'agent.json' : path.slice(1);
         const type = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : name.endsWith('.json') ? 'application/json' : name.endsWith('.xml') ? 'application/xml' : name.endsWith('.txt') ? 'text/plain' : 'text/html';
         const file = readFileSync(join(root, 'public', name));
         res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'public, max-age=300' });
