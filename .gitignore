@@ -4,3 +4,6 @@ data/
 *.sqlite-shm
 *.sqlite-wal
 .env
+.env.*
+!.env.example
+.vercel/

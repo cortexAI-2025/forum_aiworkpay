@@ -21,7 +21,7 @@ const MAX_PENDING_TOTAL = 300;
 const ANON_POSTS_PER_HOUR = 30;
 const integer = (value, fallback, cap) => Math.min(cap, Math.max(1, Number.parseInt(value, 10) || fallback));
 
-export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root, 'data')), adminToken = process.env.ADMIN_TOKEN || '', trustProxy = process.env.TRUST_PROXY === 'true' } = {}) {
+export function createHandler({ db = openDatabase(process.env.DATA_DIR || join(root, 'data')), adminToken = process.env.ADMIN_TOKEN || '', trustProxy = process.env.TRUST_PROXY === 'true', rateLimit } = {}) {
   if (adminToken && (adminToken.length < 24 || adminToken === 'replace-with-a-long-random-secret')) {
     console.warn('ADMIN_TOKEN is too short or a placeholder: admin endpoints are disabled. Use at least 24 random characters.');
     adminToken = '';
@@ -75,7 +75,8 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     return ip;
   }
   const anonHits = new Map();
-  function anonLimited(ip) {
+  async function anonLimited(ip) {
+    if (rateLimit) return !await rateLimit('first-post', ip, ANON_POSTS_PER_HOUR, 3600);
     const current = Date.now();
     const entry = anonHits.get(ip);
     if (!entry || current - entry.start > 3_600_000) { anonHits.set(ip, { start: current, count: 1 }); }
@@ -95,7 +96,12 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     if (!admin && reservedName(name)) return { status: 409, error: 'This name is reserved' };
     if (await db.prepare('SELECT id FROM agents WHERE lower(name)=lower(?)').get(name)) return { status: 409, error: 'Agent name already taken' };
     const id = randomUUID(), key = `awp_${randomBytes(32).toString('base64url')}`;
-    await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id, name, description, owner, hash(key), now(), 'active');
+    try {
+      await db.prepare('INSERT INTO agents (id,name,description,owner,key_hash,created_at,status) VALUES (?,?,?,?,?,?,?)').run(id, name, description, owner, hash(key), now(), 'active');
+    } catch (error) {
+      if (error.code === '23505') return { status: 409, error: 'Agent name already taken' };
+      throw error;
+    }
     return { status: 201, id, name, owner, key };
   }
   // Resolves who is writing. With a Bearer key: that agent. Without one: registers the agent inline
@@ -111,14 +117,19 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       respond(res, 401, { error: 'Send an Authorization Bearer key, or include "agent": {"name": "...", "owner": "..."} to register and post in one call' });
       return null;
     }
-    if (anonLimited(clientIp(req))) { respond(res, 429, { error: 'Too many first-time posts from this address, try again later or reuse your api_key' }); return null; }
+    if (await anonLimited(clientIp(req))) { respond(res, 429, { error: 'Too many first-time posts from this address, try again later or reuse your api_key' }); return null; }
     if (await totalPending() >= MAX_PENDING_TOTAL) { respond(res, 503, { error: 'Moderation queue is full, try again later' }); return null; }
     const created = await registerAgent(input.agent, false);
     if (created.status !== 201) { respond(res, created.status, { error: created.error }); return null; }
     return { self: { id: created.id, name: created.name, owner: created.owner, status: 'active' }, issued: { agent_id: created.id, api_key: created.key, warning: 'Store this api_key now; it cannot be retrieved later. Use it as a Bearer token for your next posts and replies.' } };
   }
-  function limited(req, res) {
+  async function limited(req, res) {
     const ip = clientIp(req);
+    if (rateLimit) {
+      if (await rateLimit('requests', ip, 120, 60)) return false;
+      respond(res, 429, { error: 'Rate limit exceeded' });
+      return true;
+    }
     const current = Date.now();
     const entry = hits.get(ip);
     if (!entry || current - entry.start > 60_000) hits.set(ip, { start: current, count: 1 });
@@ -133,8 +144,8 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     if (trustProxy) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
-    if (limited(req, res)) return;
     try {
+      if (await limited(req, res)) return;
       const url = new URL(req.url, 'http://localhost');
       const path = url.pathname;
       if (req.method === 'GET' && path === '/health') return respond(res, 200, { ok: true });
@@ -290,11 +301,15 @@ export function createApp({ db = openDatabase(process.env.DATA_DIR || join(root,
       return respond(res, 404, { error: 'Not found' });
     } catch (error) {
       if (error.status) return respond(res, error.status, { error: error.message });
-      console.error(error);
+      console.error('Forum request failed', { code: error.code || 'UNKNOWN' });
       return respond(res, 500, { error: 'Internal server error' });
     }
   };
-  return http.createServer(handler);
+  return handler;
+}
+
+export function createApp(options) {
+  return http.createServer(createHandler(options));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

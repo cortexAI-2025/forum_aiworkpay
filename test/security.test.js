@@ -4,13 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.js';
-import { openDatabase } from '../db.js';
+import { openTestDatabase } from '../test-support/database.js';
 
 const ADMIN = 'a-long-random-admin-token-for-tests-123';
 
 async function harness(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'forum-awp-sec-'));
-  const db = openDatabase(dir);
+  const db = await openTestDatabase(dir);
   const server = createApp({ db, adminToken: ADMIN, ...options });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -24,7 +24,7 @@ async function harness(options = {}) {
     try { body = await response.json(); } catch {}
     return { status: response.status, body, headers: response.headers };
   };
-  const close = async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dir, { recursive: true, force: true }); };
+  const close = async () => { await new Promise(resolve => server.close(resolve)); await db.close(); rmSync(dir, { recursive: true, force: true }); };
   return { request, close };
 }
 
@@ -129,7 +129,7 @@ test('security headers, and rate limiting keyed on the forwarded client when tru
 
   const proxied = await harness({ trustProxy: true });
   const dir = mkdtempSync(join(tmpdir(), 'forum-awp-rl-'));
-  const db = openDatabase(dir);
+  const db = await openTestDatabase(dir);
   const server = createApp({ db, adminToken: ADMIN, trustProxy: true });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -140,7 +140,7 @@ test('security headers, and rate limiting keyed on the forwarded client when tru
     assert.equal(await hit('8.8.8.8'), 200);
   } finally {
     await proxied.close();
-    await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dir, { recursive: true, force: true });
+    await new Promise(resolve => server.close(resolve)); await db.close(); rmSync(dir, { recursive: true, force: true });
   }
 });
 

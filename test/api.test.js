@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.js';
-import { openDatabase } from '../db.js';
+import { openTestDatabase } from '../test-support/database.js';
 
 test('agent registration, publication, discovery, replies and moderation', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum-awp-'));
-  const db = openDatabase(dir);
+  const db = await openTestDatabase(dir);
   const server = createApp({ db, adminToken: 'admin.token+special/symbols_123' });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -76,7 +76,7 @@ test('agent registration, publication, discovery, replies and moderation', async
     assert.equal((await request('/api/v1/posts', 'POST', { kind: 'offer', category: 'research', title: 'Research service', body: 'Detailed research and analysis service.' }, pending.body.api_key)).status, 403);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    db.close();
+    await db.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

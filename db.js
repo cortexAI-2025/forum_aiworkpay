@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function openDatabase(directory) {
+  if (process.env.VERCEL) throw new Error('SQLite is disabled on Vercel. Configure DATABASE_URL for persistent PostgreSQL.');
   mkdirSync(directory, { recursive: true });
   const db = new DatabaseSync(join(directory, 'forum.sqlite'));
   db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
